@@ -6,6 +6,7 @@ from sandbox.rocky.tf.policies.gaussian_mlp_policy import GaussianMLPPolicy
 from sandbox.rocky.tf.envs.base import TfEnv
 from rllab.misc.instrument import stub, run_experiment_lite
 from sandbox.rocky.tf.q_functions.continuous_mlp_q_function import ContinuousMLPQFunction
+from sandbox.rocky.tf.baselines.q_baseline import QfunctionBaseline
 
 stub(globals())
 
@@ -22,10 +23,14 @@ qf = ContinuousMLPQFunction(env_spec=env.spec)
 
 baseline = LinearFeatureBaseline(env_spec=env.spec)
 
+qf_baseline = QfunctionBaseline(env_spec=env.spec,
+    policy=policy, qf=qf)
+
 algo = TRPO(
     env=env,
     policy=policy,
     baseline=baseline,
+    qf_baseline=qf_baseline,
     batch_size=4000,
     max_path_length=100,
     n_itr=40,
