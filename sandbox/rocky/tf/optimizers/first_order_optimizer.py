@@ -1,18 +1,14 @@
-
-
-
 from rllab.misc import ext
 from rllab.misc import logger
 from rllab.core.serializable import Serializable
 from sandbox.rocky.tf.misc import tensor_utils
 # from rllab.algo.first_order_method import parse_update_method
 from rllab.optimizers.minibatch_dataset import BatchDataset
-from collections import OrderedDict
 import tensorflow as tf
 import time
-from functools import partial
 import pyprind
-
+#from sandbox.rocky.tf.misc.common_utils import memory_usage_resource
+import gc
 
 class FirstOrderOptimizer(Serializable):
     """
@@ -75,8 +71,10 @@ class FirstOrderOptimizer(Serializable):
         if extra_inputs is None:
             extra_inputs = list()
         self._input_vars = inputs + extra_inputs
+        f_loss=tensor_utils.compile_function(inputs + extra_inputs, loss)
         self._opt_fun = ext.lazydict(
-            f_loss=lambda: tensor_utils.compile_function(inputs + extra_inputs, loss),
+            f_loss=lambda: f_loss,
+            #f_loss=lambda: tensor_utils.compile_function(inputs + extra_inputs, loss),
         )
 
     def loss(self, inputs, extra_inputs=None):
@@ -85,7 +83,6 @@ class FirstOrderOptimizer(Serializable):
         return self._opt_fun["f_loss"](*(tuple(inputs) + extra_inputs))
 
     def optimize(self, inputs, extra_inputs=None, callback=None):
-
         if len(inputs) == 0:
             # Assumes that we should always sample mini-batches
             raise NotImplementedError
@@ -108,10 +105,12 @@ class FirstOrderOptimizer(Serializable):
                 logger.log("Epoch %d" % (epoch))
                 progbar = pyprind.ProgBar(len(inputs[0]))
 
+            gc.collect()
             for batch in dataset.iterate(update=True):
                 sess.run(self._train_op, dict(list(zip(self._input_vars, batch))))
                 if self._verbose:
                     progbar.update(len(batch[0]))
+            gc.collect()
 
             if self._verbose:
                 if progbar.active:

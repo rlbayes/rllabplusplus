@@ -1,6 +1,3 @@
-
-
-
 import numpy as np
 from .base import Distribution
 import tensorflow as tf
@@ -26,7 +23,7 @@ class Categorical(Distribution):
         )
         self._f_sample = tensor_utils.compile_function(
             inputs=[weights_var],
-            outputs=tf.multinomial(weights_var, num_samples=1)[:, 0],
+            outputs=tf.multinomial(tf.log(weights_var + 1e-8), num_samples=1)[:, 0],
         )
 
     @property
@@ -43,7 +40,7 @@ class Categorical(Distribution):
         # Assume layout is N * A
         return tf.reduce_sum(
             old_prob_var * (tf.log(old_prob_var + TINY) - tf.log(new_prob_var + TINY)),
-            reduction_indices=ndims - 1
+            axis=ndims - 1
         )
 
     def kl(self, old_dist_info, new_dist_info):
@@ -68,7 +65,7 @@ class Categorical(Distribution):
 
     def entropy_sym(self, dist_info_vars):
         probs = dist_info_vars["prob"]
-        return -tf.reduce_sum(probs * tf.log(probs + TINY), reduction_indices=1)
+        return -tf.reduce_sum(probs * tf.log(probs + TINY), axis=1)
 
     def cross_entropy_sym(self, old_dist_info_vars, new_dist_info_vars):
         old_prob_var = old_dist_info_vars["prob"]
@@ -77,7 +74,7 @@ class Categorical(Distribution):
         # Assume layout is N * A
         return tf.reduce_sum(
             old_prob_var * (- tf.log(new_prob_var + TINY)),
-            reduction_indices=ndims - 1
+            axis=ndims - 1
         )
 
     def entropy(self, info):
@@ -99,9 +96,7 @@ class Categorical(Distribution):
         return [("prob", (self.dim,))]
 
     def sample(self, dist_info):
-        samples = self._f_sample(dist_info["prob"])
-        import ipdb;
-        ipdb.set_trace()
+        return self._f_sample(dist_info["prob"])
 
     def sample_sym(self, dist_info):
         probs = dist_info["prob"]

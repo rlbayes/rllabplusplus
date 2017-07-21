@@ -1,0 +1,8 @@
+executable=/bin/bash
+arguments=simple.sh
+error=test.$(Process).err
+output=test.$(Process).out
+log=test.$(Process).log
+request_memory=1024
+request_cpus=1
+queue 2

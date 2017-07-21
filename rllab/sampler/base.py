@@ -69,6 +69,7 @@ class BaseSampler(Sampler):
                      path_baselines[:-1]
             path["advantages"] = special.discount_cumsum(
                 deltas, self.algo.discount * self.algo.gae_lambda)
+            path["qvalues"] = path["advantages"] + path_baselines[:-1]
             path["returns"] = special.discount_cumsum(path["rewards"], self.algo.discount)
             baselines.append(path_baselines[:-1])
             returns.append(path["returns"])
@@ -84,12 +85,13 @@ class BaseSampler(Sampler):
             rewards = tensor_utils.concat_tensor_list([path["rewards"] for path in paths])
             returns = tensor_utils.concat_tensor_list([path["returns"] for path in paths])
             advantages = tensor_utils.concat_tensor_list([path["advantages"] for path in paths])
+            qvalues = tensor_utils.concat_tensor_list([path["qvalues"] for path in paths])
             baselines_tensor = tensor_utils.concat_tensor_list(baselines)
             env_infos = tensor_utils.concat_tensor_dict_list([path["env_infos"] for path in paths])
             agent_infos = tensor_utils.concat_tensor_dict_list([path["agent_infos"] for path in paths])
             etas = None
 
-            if hasattr(self.algo, 'qprop') and self.algo.qprop and self.algo.qprop_enable:
+            if hasattr(self.algo, 'qprop') and self.algo.qprop:
                 old_advantages = np.copy(advantages)
                 old_advantages = self.process_advantages(old_advantages)
                 old_advantages_scale = np.abs(old_advantages).mean()
@@ -130,6 +132,7 @@ class BaseSampler(Sampler):
                 rewards=rewards,
                 returns=returns,
                 advantages=advantages,
+                qvalues=qvalues,
                 env_infos=env_infos,
                 agent_infos=agent_infos,
                 paths=paths,

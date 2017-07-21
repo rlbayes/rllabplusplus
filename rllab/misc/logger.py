@@ -39,6 +39,8 @@ _snapshot_gap = 1
 _log_tabular_only = False
 _header_printed = False
 
+_suppress_log = False
+
 _logger_info = dict()
 
 def _add_output(file_name, arr, fds, mode='a'):
@@ -61,6 +63,14 @@ def push_prefix(prefix):
     _prefix_str = ''.join(_prefixes)
 
 
+def suppress_output():
+    global _suppress_log
+    _suppress_log = True
+
+def unsuppress_output():
+    global _suppress_log
+    _suppress_log = False
+
 def add_text_output(file_name):
     _add_output(file_name, _text_outputs, _text_fds, mode='a')
 
@@ -70,7 +80,8 @@ def remove_text_output(file_name):
 
 
 def add_tabular_output(file_name):
-    _add_output(file_name, _tabular_outputs, _tabular_fds, mode='w')
+    #_add_output(file_name, _tabular_outputs, _tabular_fds, mode='w')
+    _add_output(file_name, _tabular_outputs, _tabular_fds, mode='a')
 
 
 def remove_tabular_output(file_name):
@@ -113,6 +124,8 @@ def get_log_tabular_only():
 
 
 def log(s, with_prefix=True, with_timestamp=True, color=None):
+    global _suppress_log
+    if _suppress_log: return
     out = s
     if with_prefix:
         out = _prefix_str + out
@@ -362,9 +375,22 @@ def log_variant(log_file, variant_data):
         json.dump(variant_json, f, indent=2, sort_keys=True, cls=MyEncoder)
 
 
-def record_tabular_misc_stat(key, values):
-    record_tabular(key + "Average", np.average(values))
-    record_tabular(key + "Std", np.std(values))
-    record_tabular(key + "Median", np.median(values))
-    record_tabular(key + "Min", np.amin(values))
-    record_tabular(key + "Max", np.amax(values))
+def record_tabular_misc_stat(key, values, placement='back'):
+    if placement == 'front':
+        prefix = ""
+        suffix = key
+    else:
+        prefix = key
+        suffix = ""
+    if len(values) > 0:
+        record_tabular(prefix + "Average" + suffix, np.average(values))
+        record_tabular(prefix + "Std" + suffix, np.std(values))
+        record_tabular(prefix + "Median" + suffix, np.median(values))
+        record_tabular(prefix + "Min" + suffix, np.min(values))
+        record_tabular(prefix + "Max" + suffix, np.max(values))
+    else:
+        record_tabular(prefix + "Average" + suffix, np.nan)
+        record_tabular(prefix + "Std" + suffix, np.nan)
+        record_tabular(prefix + "Median" + suffix, np.nan)
+        record_tabular(prefix + "Min" + suffix, np.nan)
+        record_tabular(prefix + "Max" + suffix, np.nan)

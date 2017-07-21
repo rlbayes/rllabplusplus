@@ -1,6 +1,3 @@
-import numpy as np
-
-
 class Space(object):
     """
     Provides a classification state spaces and action spaces,
@@ -32,6 +29,10 @@ class Space(object):
 
     def unflatten_n(self, xs):
         raise NotImplementedError
+
+    @property
+    def is_discrete(self):
+        return repr(self).startswith('Discrete')
 
     @property
     def flat_dim(self):

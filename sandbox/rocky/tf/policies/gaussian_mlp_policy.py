@@ -155,6 +155,11 @@ class GaussianMLPPolicy(StochasticPolicy, LayersPowered, Serializable):
             raise NotImplementedError
         return dict(mean=mean_var, log_std=log_std_var)
 
+    def dist_info(self, observations):
+        flat_obs = self.observation_space.flatten_n(observations)
+        means, log_stds = self._f_dist(flat_obs)
+        return dict(mean=means, log_std=log_stds)
+
     @overrides
     def get_action(self, observation):
         flat_obs = self.observation_space.flatten(observation)

@@ -29,9 +29,6 @@ class Discrete(Space):
     def __repr__(self):
         return "Discrete(%d)" % self.n
 
-    def __eq__(self, other):
-        return self.n == other.n
-
     def flatten(self, x):
         return special.to_onehot(x, self.n)
 
@@ -58,6 +55,11 @@ class Discrete(Space):
     def new_tensor_variable(self, name, extra_dims):
         # needed for safe conversion to float32
         return tf.placeholder(dtype=tf.uint8, shape=[None] * extra_dims + [self.flat_dim], name=name)
+        #return tf.placeholder(dtype=tf.int64, shape=[None] * extra_dims, name=name)
+
+    @property
+    def dtype(self):
+        return tf.uint8
 
     def __eq__(self, other):
         if not isinstance(other, Discrete):
@@ -66,3 +68,4 @@ class Discrete(Space):
 
     def __hash__(self):
         return hash(self.n)
+

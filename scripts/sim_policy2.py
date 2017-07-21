@@ -15,7 +15,7 @@ if __name__ == "__main__":
                         help='Max length of rollout')
     parser.add_argument('--speedup', type=float, default=1,
                         help='Speedup')
-    parser.add_argument('--record_gym', type=bool, default=False,
+    parser.add_argument('--record_gym', type=bool, default=True,
                         help='Record video and log for gym environment.')
     args = parser.parse_args()
 
@@ -39,4 +39,5 @@ if __name__ == "__main__":
                         record_video=True, record_log=True)
                 while True:
                     path = rollout(env, policy, max_path_length=args.max_path_length,
-                                   animated=True, speedup=args.speedup)
+                                   animated=True, always_return_paths=True, speedup=args.speedup)
+                    print("Path length=%d, reward=%f"%(len(path["rewards"]),path["rewards"].sum()))

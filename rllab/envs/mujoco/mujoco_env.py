@@ -1,5 +1,6 @@
 import numpy as np
 import os.path as osp
+from cached_property import cached_property
 
 from rllab import spaces
 from rllab.envs.base import Env
@@ -86,7 +87,7 @@ class MujocoEnv(Env):
         self.reset()
         super(MujocoEnv, self).__init__()
 
-    @property
+    @cached_property
     @overrides
     def action_space(self):
         bounds = self.model.actuator_ctrlrange
@@ -94,7 +95,7 @@ class MujocoEnv(Env):
         ub = bounds[:, 1]
         return spaces.Box(lb, ub)
 
-    @property
+    @cached_property
     @overrides
     def observation_space(self):
         shp = self.get_current_obs().shape
@@ -196,9 +197,18 @@ class MujocoEnv(Env):
             self.viewer.set_model(self.model)
         return self.viewer
 
-    def render(self):
-        viewer = self.get_viewer()
-        viewer.loop_once()
+    def render(self, close=False, mode='human'):
+        if mode == 'human':
+            viewer = self.get_viewer()
+            viewer.loop_once()
+        elif mode == 'rgb_array':
+            viewer = self.get_viewer()
+            viewer.loop_once()
+            # self.get_viewer(config=config).render()
+            data, width, height = self.get_viewer().get_image()
+            return np.fromstring(data, dtype='uint8').reshape(height, width, 3)[::-1,:,:]
+        if close:
+            self.stop_viewer()
 
     def start_viewer(self):
         viewer = self.get_viewer()

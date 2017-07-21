@@ -241,7 +241,7 @@ class GaussianMLPRegressor(LayersPowered, Serializable):
             L.get_output([self._l_mean, self._l_log_std], {self._mean_network.input_layer: normalized_xs_var})
 
         means_var = normalized_means_var * self._y_std_var + self._y_mean_var
-        log_stds_var = normalized_log_stds_var + TT.log(self._y_std_var)
+        log_stds_var = normalized_log_stds_var + tf.log(self._y_std_var)
 
         return self._dist.log_likelihood_sym(y_var, dict(mean=means_var, log_std=log_stds_var))
 

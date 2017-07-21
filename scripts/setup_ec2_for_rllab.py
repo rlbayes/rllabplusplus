@@ -1,5 +1,4 @@
 import boto3
-import re
 import sys
 import json
 import botocore
@@ -37,9 +36,18 @@ AWS_S3_PATH = "s3://$s3_bucket_name/rllab/experiments"
 AWS_CODE_SYNC_S3_PATH = "s3://$s3_bucket_name/rllab/code"
 
 ALL_REGION_AWS_IMAGE_IDS = {
-    "us-west-1": "ami-ad81c8cd",
-    "us-west-2": "ami-7ea27a1e",
-    "us-east-1": "ami-6b99d57c"
+    "ap-northeast-1": "ami-002f0167",
+    "ap-northeast-2": "ami-590bd937",
+    "ap-south-1": "ami-77314318",
+    "ap-southeast-1": "ami-1610a975",
+    "ap-southeast-2": "ami-9dd4ddfe",
+    "eu-central-1": "ami-63af720c",
+    "eu-west-1": "ami-41484f27",
+    "sa-east-1": "ami-b7234edb",
+    "us-east-1": "ami-83f26195",
+    "us-east-2": "ami-66614603",
+    "us-west-1": "ami-576f4b37",
+    "us-west-2": "ami-b8b62bd8"
 }
 
 AWS_IMAGE_ID = ALL_REGION_AWS_IMAGE_IDS[AWS_REGION_NAME]
@@ -72,6 +80,7 @@ AWS_SECURITY_GROUP_IDS = ALL_REGION_AWS_SECURITY_GROUP_IDS[AWS_REGION_NAME]
 FAST_CODE_SYNC_IGNORES = [
     ".git",
     "data/local",
+    "data/remote",
     "data/s3",
     "data/video",
     "src",

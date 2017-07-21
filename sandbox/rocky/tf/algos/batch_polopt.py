@@ -1,3 +1,5 @@
+import shutil
+import os
 import time
 import numpy as np
 from rllab.algos.base import RLAlgorithm
@@ -7,12 +9,14 @@ import tensorflow as tf
 from sandbox.rocky.tf.samplers.batch_sampler import BatchSampler
 from sandbox.rocky.tf.samplers.vectorized_sampler import VectorizedSampler
 from rllab.pool.simple_pool import SimpleReplayPool
-from rllab.misc import ext
-from rllab.core.serializable import Serializable
-from sandbox.rocky.tf.misc import tensor_utils
-from sandbox.rocky.tf.optimizers.first_order_optimizer import FirstOrderOptimizer
+from sandbox.rocky.tf.misc.common_utils import memory_usage_resource
+from sandbox.rocky.tf.misc.common_utils import pickle_load, pickle_dump
+import gc
+import joblib
+from sandbox.rocky.tf.algos.poleval import Poleval
+from rllab.sampler.utils import rollout
 
-class BatchPolopt(RLAlgorithm):
+class BatchPolopt(RLAlgorithm, Poleval):
     """
     Base class for batch sampling-based policy optimization methods.
     This includes various policy gradient methods like vpg, npg, ppo, trpo, etc.
@@ -42,24 +46,16 @@ class BatchPolopt(RLAlgorithm):
             force_batch_sampler=False,
             # qprop params
             qf=None,
-            min_pool_size=10000,
-            replay_pool_size=1000000,
-            replacement_prob=1.0,
             qf_updates_ratio=1,
-            qprop_use_mean_action=True,
-            qprop_min_itr=0,
-            qprop_batch_size=None,
-            qprop_use_advantage=True,
-            qprop_use_qf_baseline=False,
             qprop_eta_option='ones',
-            qf_weight_decay=0.,
-            qf_update_method='adam',
-            qf_learning_rate=1e-3,
-            qf_batch_size=32,
-            qf_baseline=None,
-            soft_target=True,
-            soft_target_tau=0.001,
-            scale_reward=1.0,
+            qprop_nu=0,
+            save_freq=0,
+            restore_auto=True,
+            policy_sample_last=True,
+            qprop=True,
+            ac_sample_backups=0,
+            ac_delta=0,
+            save_format='pickle',
             **kwargs
     ):
         """
@@ -103,45 +99,26 @@ class BatchPolopt(RLAlgorithm):
         self.fixed_horizon = fixed_horizon
         self.qf = qf
         if self.qf is not None:
-            self.qprop = True
-            self.qprop_optimizer = Serializable.clone(self.optimizer)
-            self.min_pool_size = min_pool_size
-            self.replay_pool_size = replay_pool_size
-            self.replacement_prob = replacement_prob
+            self.qprop = qprop
             self.qf_updates_ratio = qf_updates_ratio
-            self.qprop_use_mean_action = qprop_use_mean_action
-            self.qprop_min_itr = qprop_min_itr
-            self.qprop_use_qf_baseline = qprop_use_qf_baseline
-            self.qf_weight_decay = qf_weight_decay
-            self.qf_update_method = \
-                FirstOrderOptimizer(
-                    update_method=qf_update_method,
-                    learning_rate=qf_learning_rate,
-                )
-            self.qf_learning_rate = qf_learning_rate
-            self.qf_batch_size = qf_batch_size
-            self.qf_baseline = qf_baseline
-            if qprop_batch_size is None:
-                self.qprop_batch_size = self.batch_size
-            else:
-                self.qprop_batch_size = qprop_batch_size
-            self.qprop_use_advantage = qprop_use_advantage
+            self.qprop_nu = qprop_nu
             self.qprop_eta_option = qprop_eta_option
-            self.soft_target_tau = soft_target_tau
-            self.scale_reward = scale_reward
+            self.policy_sample_last = policy_sample_last
 
-            self.qf_loss_averages = []
-            self.q_averages = []
-            self.y_averages = []
-            if self.start_itr >= self.qprop_min_itr:
-                self.batch_size = self.qprop_batch_size
-                if self.qprop_use_qf_baseline:
-                    self.baseline = self.qf_baseline
-                self.qprop_enable = True
-            else:
-                self.qprop_enable = False
+            self.ac_delta = ac_delta
+            if self.ac_delta > 0:
+                self.ac_sample_backups = ac_sample_backups
+
+            self.init_critic(**kwargs)
+
+            self.qf_dqn = False
+            assert self.qprop or self.ac_delta > 0, "Error: no use for qf."
         else:
+            self.ac_delta = 0
             self.qprop = False
+            self.qf_mc_ratio = 0
+            self.qf_residual_phi = 0
+
         if sampler_cls is None:
             if self.policy.vectorized and not force_batch_sampler:
                 sampler_cls = VectorizedSampler
@@ -152,10 +129,12 @@ class BatchPolopt(RLAlgorithm):
 
         self.sampler = sampler_cls(self, **sampler_args)
 
+        self.save_freq = save_freq
+        self.save_format = save_format
+        self.restore_auto = restore_auto
+
     def start_worker(self):
         self.sampler.start_worker()
-        if self.plot:
-            plotter.init_plot(self.env, self.policy)
 
     def shutdown_worker(self):
         self.sampler.shutdown_worker()
@@ -166,61 +145,119 @@ class BatchPolopt(RLAlgorithm):
     def process_samples(self, itr, paths):
         return self.sampler.process_samples(itr, paths)
 
-    def train(self):
-        with tf.Session() as sess:
-            sess.run(tf.initialize_all_variables())
-            if self.qprop:
-                pool = SimpleReplayPool(
-                    max_pool_size=self.replay_pool_size,
-                    observation_dim=self.env.observation_space.flat_dim,
-                    action_dim=self.env.action_space.flat_dim,
-                    replacement_prob=self.replacement_prob,
-                )
-            self.start_worker()
-            self.init_opt()
-            # This initializes the optimizer parameters
-            sess.run(tf.initialize_all_variables())
-            start_time = time.time()
-            for itr in range(self.start_itr, self.n_itr):
-                itr_start_time = time.time()
-                with logger.prefix('itr #%d | ' % itr):
-                    if self.qprop and not self.qprop_enable and \
-                            itr >= self.qprop_min_itr:
-                        logger.log("Restarting workers with batch size %d->%d..."%(
-                            self.batch_size, self.qprop_batch_size))
-                        self.shutdown_worker()
-                        self.batch_size = self.qprop_batch_size
-                        self.start_worker()
-                        if self.qprop_use_qf_baseline:
-                            self.baseline = self.qf_baseline
-                        self.qprop_enable = True
-                    logger.log("Obtaining samples...")
-                    paths = self.obtain_samples(itr)
-                    logger.log("Processing samples...")
-                    samples_data = self.process_samples(itr, paths)
-                    logger.log("Logging diagnostics...")
-                    self.log_diagnostics(paths)
-                    if self.qprop:
-                        logger.log("Adding samples to replay pool...")
-                        self.add_pool(itr, paths, pool)
-                        logger.log("Optimizing critic before policy...")
-                        self.optimize_critic(itr, pool)
-                    logger.log("Optimizing policy...")
-                    self.optimize_policy(itr, samples_data)
-                    params = self.get_itr_snapshot(itr, samples_data)  # , **kwargs)
-                    if self.store_paths:
-                        params["paths"] = samples_data["paths"]
-                    logger.save_itr_params(itr, params)
-                    logger.log("Saved")
-                    logger.record_tabular('Time', time.time() - start_time)
-                    logger.record_tabular('ItrTime', time.time() - itr_start_time)
-                    logger.dump_tabular(with_prefix=False)
-                    if self.plot:
-                        self.update_plot()
-                        if self.pause_for_plot:
-                            input("Plotting evaluation run: Press Enter to "
-                                  "continue...")
+    def save(self, checkpoint_dir=None):
+        if checkpoint_dir is None: checkpoint_dir = logger.get_snapshot_dir()
+
+        if self.qf is not None:
+            pool_file = os.path.join(checkpoint_dir, 'pool.chk')
+            if self.save_format == 'pickle':
+                pickle_dump(pool_file + '.tmp', self.pool)
+            elif self.save_format == 'joblib':
+                joblib.dump(self.pool, pool_file + '.tmp', compress=1, cache_size=1e9)
+            else: raise NotImplementedError
+            shutil.move(pool_file + '.tmp', pool_file)
+
+        checkpoint_file = os.path.join(checkpoint_dir, 'params.chk')
+        sess = tf.get_default_session()
+        saver = tf.train.Saver()
+        saver.save(sess, checkpoint_file)
+
+        tabular_file = os.path.join(checkpoint_dir, 'progress.csv')
+        if os.path.isfile(tabular_file):
+            tabular_chk_file = os.path.join(checkpoint_dir, 'progress.csv.chk')
+            shutil.copy(tabular_file, tabular_chk_file)
+
+        logger.log('Saved to checkpoint %s'%checkpoint_file)
+
+    def restore(self, checkpoint_dir=None):
+        if checkpoint_dir is None: checkpoint_dir = logger.get_snapshot_dir()
+        checkpoint_file = os.path.join(checkpoint_dir, 'params.chk')
+        if os.path.isfile(checkpoint_file + '.meta'):
+            sess = tf.get_default_session()
+            saver = tf.train.Saver()
+            saver.restore(sess, checkpoint_file)
+
+            tabular_chk_file = os.path.join(checkpoint_dir, 'progress.csv.chk')
+            if os.path.isfile(tabular_chk_file):
+                tabular_file = os.path.join(checkpoint_dir, 'progress.csv')
+                logger.remove_tabular_output(tabular_file)
+                shutil.copy(tabular_chk_file, tabular_file)
+                logger.add_tabular_output(tabular_file)
+
+            if self.qf is not None:
+                pool_file = os.path.join(checkpoint_dir, 'pool.chk')
+                if self.save_format == 'pickle':
+                    pickle_load(pool_file)
+                elif self.save_format == 'joblib':
+                    self.pool = joblib.load(pool_file)
+                else: raise NotImplementedError
+
+            logger.log('Restored from checkpoint %s'%checkpoint_file)
+        else:
+            logger.log('No checkpoint %s'%checkpoint_file)
+
+    def train(self, sess=None):
+        global_step = tf.Variable(0, name='global_step', trainable=False, dtype=tf.int32)
+        increment_global_step_op = tf.assign(global_step, global_step+1)
+        created_session = True if (sess is None) else False
+        if sess is None:
+            sess = tf.Session()
+            sess.__enter__()
+        sess.run(tf.global_variables_initializer())
+        if self.qf is not None:
+            self.pool = SimpleReplayPool(
+                max_pool_size=self.replay_pool_size,
+                observation_dim=self.env.observation_space.flat_dim,
+                action_dim=self.env.action_space.flat_dim,
+                replacement_prob=self.replacement_prob,
+                env=self.env,
+            )
+        self.start_worker()
+        self.init_opt()
+        # This initializes the optimizer parameters
+        sess.run(tf.global_variables_initializer())
+        if self.restore_auto: self.restore()
+        itr = sess.run(global_step)
+        start_time = time.time()
+        t0 = time.time()
+        while itr < self.n_itr:
+            itr_start_time = time.time()
+            with logger.prefix('itr #%d | ' % itr):
+                logger.log("Mem: %f"%memory_usage_resource())
+                logger.log("Obtaining samples...")
+                paths = self.obtain_samples(itr)
+                logger.log("Processing samples...")
+                samples_data = self.process_samples(itr, paths)
+                logger.log("Logging diagnostics...")
+                self.log_diagnostics(paths)
+                if self.qf is not None:
+                    logger.log("Adding samples to replay pool...")
+                    self.add_pool(itr, paths, self.pool)
+                    logger.log("Optimizing critic before policy...")
+                    self.optimize_critic(itr, self.pool, samples_data)
+                logger.log("Optimizing policy...")
+                self.optimize_policy(itr, samples_data)
+                self.log_critic_training()
+                params = self.get_itr_snapshot(itr, samples_data)  # , **kwargs)
+                if self.store_paths:
+                    params["paths"] = samples_data["paths"]
+                logger.save_itr_params(itr, params)
+                logger.log("Saved")
+                logger.record_tabular('Time', time.time() - start_time)
+                logger.record_tabular('ItrTime', time.time() - itr_start_time)
+                logger.dump_tabular(with_prefix=False)
+                if self.plot:
+                    rollout(self.env, self.policy, animated=True, max_path_length=self.max_path_length)
+                    if self.pause_for_plot:
+                        input("Plotting evaluation run: Press Enter to "
+                              "continue...")
+                if time.time() - t0 > 10: gc.collect(); t0 = time.time()
+                itr = sess.run(increment_global_step_op)
+                if self.save_freq > 0 and (itr-1) % self.save_freq == 0: self.save()
+
         self.shutdown_worker()
+        if created_session:
+            sess.close()
 
     def log_diagnostics(self, paths):
         self.env.log_diagnostics(paths)
@@ -234,63 +271,8 @@ class BatchPolopt(RLAlgorithm):
         """
         raise NotImplementedError
 
-    def init_opt_critic(self, vars_info, qbaseline_info):
-        assert(not self.policy.recurrent)
-
-        # Compute Taylor expansion Q function
-        delta = vars_info["action_var"] - qbaseline_info["action_mu"]
-        control_variate = tf.reduce_sum(delta * qbaseline_info["qprime"], 1)
-        if not self.qprop_use_advantage:
-            control_variate += qbaseline_info["qvalue"]
-            logger.log("Qprop, using Q-value over A-value")
-        f_control_variate = tensor_utils.compile_function(
-            inputs=[vars_info["obs_var"], vars_info["action_var"]],
-            outputs=[control_variate, qbaseline_info["qprime"]],
-        )
-
-        target_qf = Serializable.clone(self.qf, name="target_qf")
-
-        # y need to be computed first
-        obs = self.env.observation_space.new_tensor_variable(
-            'obs',
-            extra_dims=1,
-        )
-
-        # The yi values are computed separately as above and then passed to
-        # the training functions below
-        action = self.env.action_space.new_tensor_variable(
-            'action',
-            extra_dims=1,
-        )
-        yvar = tf.placeholder(dtype=tf.float32, shape=[None], name='ys')
-
-        qf_weight_decay_term = 0.5 * self.qf_weight_decay * \
-                               sum([tf.reduce_sum(tf.square(param)) for param in
-                                    self.qf.get_params(regularizable=True)])
-
-        qval = self.qf.get_qval_sym(obs, action)
-
-        qf_loss = tf.reduce_mean(tf.square(yvar - qval))
-        qf_reg_loss = qf_loss + qf_weight_decay_term
-
-        qf_input_list = [yvar, obs, action]
-
-        self.qf_update_method.update_opt(
-            loss=qf_reg_loss, target=self.qf, inputs=qf_input_list)
-
-        f_train_qf = tensor_utils.compile_function(
-            inputs=qf_input_list,
-            outputs=[qf_loss, qval, self.qf_update_method._train_op],
-        )
-
-        self.opt_info_critic = dict(
-            f_train_qf=f_train_qf,
-            target_qf=target_qf,
-            f_control_variate=f_control_variate,
-        )
-
     def get_control_variate(self, observations, actions):
-        control_variate, qprime = self.opt_info_critic["f_control_variate"](observations, actions)
+        control_variate = self.opt_info_qprop["f_control_variate"](observations, actions)
         return control_variate
 
     def get_itr_snapshot(self, itr, samples_data):
@@ -314,17 +296,16 @@ class BatchPolopt(RLAlgorithm):
                 reward = path["rewards"][i]
                 terminal = path["terminals"][i]
                 initial = i == 0
-                pool.add_sample(observation, action, reward * self.scale_reward, terminal, initial)
+                pool.add_sample(observation, action, reward, terminal, initial)
             path_lens.append(path_len)
         path_lens = np.array(path_lens)
         logger.log("PathsInfo epsN=%d, meanL=%.2f, maxL=%d, minL=%d"%(
             len(paths), path_lens.mean(), path_lens.max(), path_lens.min()))
         logger.log("Put %d transitions to replay, size=%d"%(path_lens.sum(), pool.size))
 
-    def optimize_critic(self, itr, pool):
+    def optimize_critic(self, itr, pool, samples_data):
         # Train the critic
         if pool.size >= self.min_pool_size:
-            #qf_itrs = float(self.batch_size)/self.qf_batch_size*self.qf_updates_ratio
             qf_itrs = float(self.batch_size)*self.qf_updates_ratio
             qf_itrs = int(np.ceil(qf_itrs))
             logger.log("Fitting critic for %d iterations, batch size=%d"%(
@@ -332,37 +313,7 @@ class BatchPolopt(RLAlgorithm):
             for i in range(qf_itrs):
                 # Train policy
                 batch = pool.random_batch(self.qf_batch_size)
-                self.do_training(itr, batch)
-
-    def do_training(self, itr, batch):
-
-        obs, actions, rewards, next_obs, terminals = ext.extract(
-            batch,
-            "observations", "actions", "rewards", "next_observations",
-            "terminals"
-        )
-
-        # compute the on-policy y values
-        target_qf = self.opt_info_critic["target_qf"]
-
-        next_actions, next_actions_dict = self.policy.get_actions(next_obs)
-        if self.qprop_use_mean_action:
-            next_actions = next_actions_dict["mean"]
-        next_qvals = target_qf.get_qval(next_obs, next_actions)
-
-        ys = rewards + (1. - terminals) * self.discount * next_qvals
-
-        f_train_qf = self.opt_info_critic["f_train_qf"]
-
-        qf_loss, qval, _ = f_train_qf(ys, obs, actions)
-
-        target_qf.set_param_values(
-            target_qf.get_param_values() * (1.0 - self.soft_target_tau) +
-            self.qf.get_param_values() * self.soft_target_tau)
-
-        self.qf_loss_averages.append(qf_loss)
-        self.q_averages.append(qval)
-        self.y_averages.append(ys)
+                self.do_critic_training(itr, batch, samples_data)
 
     def update_plot(self):
         if self.plot:

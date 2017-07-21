@@ -3,12 +3,18 @@ from rllab.misc import krylov
 from rllab.misc import logger
 from rllab.core.serializable import Serializable
 # from rllab.misc.ext import flatten_tensor_variables
-import itertools
 import numpy as np
 import tensorflow as tf
 from sandbox.rocky.tf.misc import tensor_utils
-from rllab.misc.ext import sliced_fun
+#from rllab.misc.ext import sliced_fun
+#from sandbox.rocky.tf.misc.common_utils import memory_usage_resource
+import gc
 
+def sliced_fun(fn, num_slices=1):
+    def sliced_f(sliced_inputs, non_sliced_inputs=None):
+        if non_sliced_inputs is None: non_sliced_inputs = []
+        return fn(*(sliced_inputs + non_sliced_inputs))
+    return sliced_f
 
 class PerlmutterHvp(object):
     def __init__(self, num_slices=1):
@@ -32,7 +38,7 @@ class PerlmutterHvp(object):
         def Hx_plain():
             Hx_plain_splits = tf.gradients(
                 tf.reduce_sum(
-                    tf.pack([tf.reduce_sum(g * x) for g, x in zip(constraint_grads, xs)])
+                    tf.stack([tf.reduce_sum(g * x) for g, x in zip(constraint_grads, xs)])
                 ),
                 params
             )
@@ -41,12 +47,14 @@ class PerlmutterHvp(object):
                     Hx_plain_splits[idx] = tf.zeros_like(param)
             return tensor_utils.flatten_tensor_variables(Hx_plain_splits)
 
-        self.opt_fun = ext.lazydict(
-            f_Hx_plain=lambda: tensor_utils.compile_function(
+        f_Hx_plain = tensor_utils.compile_function(
                 inputs=inputs + xs,
                 outputs=Hx_plain(),
                 log_name="f_Hx_plain",
-            ),
+            )
+
+        self.opt_fun = ext.lazydict(
+                f_Hx_plain=lambda: f_Hx_plain,
         )
 
     def build_eval(self, inputs):
@@ -97,12 +105,14 @@ class FiniteDifferenceHvp(object):
                 hx = (flat_grad_dvplus - flat_grad) / eps
             return hx
 
+        f_grad=tensor_utils.compile_function(
+            inputs=inputs,
+            outputs=flat_grad,
+            log_name="f_grad",
+        )
+
         self.opt_fun = ext.lazydict(
-            f_grad=lambda: tensor_utils.compile_function(
-                inputs=inputs,
-                outputs=flat_grad,
-                log_name="f_grad",
-            ),
+            f_grad=lambda: f_grad,
             f_Hx_plain=lambda: f_Hx_plain,
         )
 
@@ -198,27 +208,32 @@ class ConjugateGradientOptimizer(Serializable):
         self._max_constraint_val = constraint_value
         self._constraint_name = constraint_name
 
+        f_loss=tensor_utils.compile_function(
+            inputs=inputs + extra_inputs,
+            outputs=loss,
+            log_name="f_loss",
+        )
+        f_grad=tensor_utils.compile_function(
+            inputs=inputs + extra_inputs,
+            outputs=flat_grad,
+            log_name="f_grad",
+        )
+        f_constraint=tensor_utils.compile_function(
+            inputs=inputs + extra_inputs,
+            outputs=constraint_term,
+            log_name="constraint",
+        )
+        f_loss_constraint=tensor_utils.compile_function(
+            inputs=inputs + extra_inputs,
+            outputs=[loss, constraint_term],
+            log_name="f_loss_constraint",
+        )
+
         self._opt_fun = ext.lazydict(
-            f_loss=lambda: tensor_utils.compile_function(
-                inputs=inputs + extra_inputs,
-                outputs=loss,
-                log_name="f_loss",
-            ),
-            f_grad=lambda: tensor_utils.compile_function(
-                inputs=inputs + extra_inputs,
-                outputs=flat_grad,
-                log_name="f_grad",
-            ),
-            f_constraint=lambda: tensor_utils.compile_function(
-                inputs=inputs + extra_inputs,
-                outputs=constraint_term,
-                log_name="constraint",
-            ),
-            f_loss_constraint=lambda: tensor_utils.compile_function(
-                inputs=inputs + extra_inputs,
-                outputs=[loss, constraint_term],
-                log_name="f_loss_constraint",
-            ),
+            f_loss=lambda: f_loss,
+            f_grad=lambda: f_grad,
+            f_constraint=lambda: f_constraint,
+            f_loss_constraint=lambda: f_loss_constraint,
         )
 
     def loss(self, inputs, extra_inputs=None):
@@ -233,7 +248,8 @@ class ConjugateGradientOptimizer(Serializable):
             extra_inputs = tuple()
         return sliced_fun(self._opt_fun["f_constraint"], self._num_slices)(inputs, extra_inputs)
 
-    def optimize(self, inputs, extra_inputs=None, subsample_grouped_inputs=None):
+    def optimize(self, inputs, extra_inputs=None, subsample_grouped_inputs=None, verbose=True):
+        if not verbose: logger.suppress_output()
         prev_param = np.copy(self._target.get_param_values(trainable=True))
         inputs = tuple(inputs)
         if extra_inputs is None:
@@ -253,6 +269,7 @@ class ConjugateGradientOptimizer(Serializable):
 
         logger.log("Start CG optimization: #parameters: %d, #inputs: %d, #subsample_inputs: %d"%(len(prev_param),len(inputs[0]), len(subsample_inputs[0])))
 
+        gc.collect()
         logger.log("computing loss before")
         loss_before = sliced_fun(self._opt_fun["f_loss"], self._num_slices)(inputs, extra_inputs)
         logger.log("performing update")
@@ -265,6 +282,7 @@ class ConjugateGradientOptimizer(Serializable):
         Hx = self._hvp_approach.build_eval(subsample_inputs + extra_inputs)
 
         descent_direction = krylov.cg(Hx, flat_g, cg_iters=self._cg_iters)
+        gc.collect()
 
         initial_step_size = np.sqrt(
             2.0 * self._max_constraint_val * (1. / (descent_direction.dot(Hx(descent_direction)) + 1e-8))
@@ -302,3 +320,46 @@ class ConjugateGradientOptimizer(Serializable):
         logger.log("backtrack iters: %d" % n_iter)
         logger.log("computing loss after")
         logger.log("optimization finished")
+        if not verbose: logger.unsuppress_output()
+
+    def update_opt_trust_region(self, loss, step_size, input_list, obs_var, target, policy):
+        if policy.recurrent: raise NotImplementedError
+        dist = policy.distribution
+
+        old_dist_info_vars = {
+            k: tf.placeholder(tf.float32, shape=[None] * (1) + list(shape), name='old_%s' % k)
+            for k, shape in dist.dist_info_specs
+            }
+        old_dist_info_vars_list = [old_dist_info_vars[k] for k in dist.dist_info_keys]
+
+        state_info_vars = {
+            k: tf.placeholder(tf.float32, shape=[None] * (1) + list(shape), name=k)
+            for k, shape in policy.state_info_specs
+            }
+        state_info_vars_list = [state_info_vars[k] for k in policy.state_info_keys]
+        dist_info_vars = policy.dist_info_sym(obs_var, state_info_vars)
+        kl = dist.kl_sym(old_dist_info_vars, dist_info_vars)
+        mean_kl = tf.reduce_mean(kl)
+        input_list = input_list + [obs_var] + state_info_vars_list + old_dist_info_vars_list
+        self.update_opt(
+                loss=loss,
+                target=target,
+                leq_constraint=(mean_kl, step_size),
+                inputs=input_list,
+                constraint_name="mean_kl",
+        )
+
+        def f_train(input_values):
+            loss_before = self.loss(input_values)
+            mean_kl_before = self.constraint_val(input_values)
+            self.optimize(input_values, verbose=False)
+            mean_kl_after = self.constraint_val(input_values)
+            loss_after = self.loss(input_values)
+            return dict(
+                loss_before=loss_before,
+                mean_kl_before=mean_kl_before,
+                loss_after=loss_after,
+                mean_kl_after=mean_kl_after,
+            )
+
+        return f_train

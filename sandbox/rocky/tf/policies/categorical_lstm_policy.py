@@ -2,7 +2,7 @@ import numpy as np
 import sandbox.rocky.tf.core.layers as L
 import tensorflow as tf
 from sandbox.rocky.tf.core.layers_powered import LayersPowered
-from sandbox.rocky.tf.core.network import LSTMNetwork, MLP
+from sandbox.rocky.tf.core.network import LSTMNetwork
 from sandbox.rocky.tf.distributions.recurrent_categorical import RecurrentCategorical
 from sandbox.rocky.tf.misc import tensor_utils
 from sandbox.rocky.tf.spaces.discrete import Discrete
@@ -64,7 +64,7 @@ class CategoricalLSTMPolicy(StochasticPolicy, LayersPowered, Serializable):
                     name="reshape_feature",
                     op=lambda flat_feature, input: tf.reshape(
                         flat_feature,
-                        tf.pack([tf.shape(input)[0], tf.shape(input)[1], feature_dim])
+                        tf.stack([tf.shape(input)[0], tf.shape(input)[1], feature_dim])
                     ),
                     shape_op=lambda _, input_shape: (input_shape[0], input_shape[1], feature_dim)
                 )
@@ -97,8 +97,9 @@ class CategoricalLSTMPolicy(StochasticPolicy, LayersPowered, Serializable):
             self.f_step_prob = tensor_utils.compile_function(
                 [
                     flat_input_var,
-                    prob_network.step_prev_hidden_layer.input_var,
-                    prob_network.step_prev_cell_layer.input_var
+                    #prob_network.step_prev_hidden_layer.input_var,
+                    #prob_network.step_prev_cell_layer.input_var
+                    prob_network.step_prev_state_layer.input_var,
                 ],
                 L.get_output([
                     prob_network.step_output_layer,
@@ -126,12 +127,12 @@ class CategoricalLSTMPolicy(StochasticPolicy, LayersPowered, Serializable):
     def dist_info_sym(self, obs_var, state_info_vars):
         n_batches = tf.shape(obs_var)[0]
         n_steps = tf.shape(obs_var)[1]
-        obs_var = tf.reshape(obs_var, tf.pack([n_batches, n_steps, -1]))
+        obs_var = tf.reshape(obs_var, tf.stack([n_batches, n_steps, -1]))
         obs_var = tf.cast(obs_var, tf.float32)
         if self.state_include_action:
             prev_action_var = state_info_vars["prev_action"]
             prev_action_var = tf.cast(prev_action_var, tf.float32)
-            all_input_var = tf.concat(2, [obs_var, prev_action_var])
+            all_input_var = tf.concat(axis=2, values=[obs_var, prev_action_var])
         else:
             all_input_var = obs_var
         if self.feature_network is None:
@@ -187,7 +188,9 @@ class CategoricalLSTMPolicy(StochasticPolicy, LayersPowered, Serializable):
             ], axis=-1)
         else:
             all_input = flat_obs
-        probs, hidden_vec, cell_vec = self.f_step_prob(all_input, self.prev_hiddens, self.prev_cells)
+        probs, hidden_vec, cell_vec = self.f_step_prob(all_input,
+                #self.prev_hiddens, self.prev_cells)
+                np.concatenate((self.prev_hiddens, self.prev_cells),axis=1))
         actions = special.weighted_sample_n(probs, np.arange(self.action_space.n))
         prev_actions = self.prev_actions
         self.prev_actions = self.action_space.flatten_n(actions)

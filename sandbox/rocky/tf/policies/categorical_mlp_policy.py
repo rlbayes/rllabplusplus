@@ -4,10 +4,9 @@ from sandbox.rocky.tf.core.network import MLP
 from rllab.core.serializable import Serializable
 from sandbox.rocky.tf.distributions.categorical import Categorical
 from sandbox.rocky.tf.policies.base import StochasticPolicy
-from rllab.misc import ext
+#from rllab.misc import ext
 from sandbox.rocky.tf.misc import tensor_utils
 from rllab.misc.overrides import overrides
-from sandbox.rocky.tf.spaces.discrete import Discrete
 import tensorflow as tf
 
 
@@ -30,7 +29,7 @@ class CategoricalMLPPolicy(StochasticPolicy, LayersPowered, Serializable):
         """
         Serializable.quick_init(self, locals())
 
-        assert isinstance(env_spec.action_space, Discrete)
+        assert env_spec.action_space.is_discrete
 
         with tf.variable_scope(name):
             if prob_network is None:

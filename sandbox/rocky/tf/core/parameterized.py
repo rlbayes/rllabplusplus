@@ -13,16 +13,6 @@ def suppress_params_loading():
     yield
     load_params = True
 
-load_params = True
-
-@contextmanager
-def suppress_params_loading():
-    global load_params
-    load_params = False
-    yield
-    load_params = True
-
-
 class Parameterized(object):
     def __init__(self):
         self._cached_params = {}
@@ -68,7 +58,7 @@ class Parameterized(object):
         param_values = tf.get_default_session().run(params)
         return flatten_tensors(param_values)
 
-    def set_param_values(self, flattened_params, **tags):
+    def set_param_values(self, flattened_params, sess=None, **tags):
         debug = tags.pop("debug", False)
         param_values = unflatten_tensors(
             flattened_params, self.get_param_shapes(**tags))
@@ -79,7 +69,7 @@ class Parameterized(object):
                 self.get_param_dtypes(**tags),
                 param_values):
             if param not in self._cached_assign_ops:
-                assign_placeholder = tf.placeholder(dtype=param.dtype.base_dtype)
+                assign_placeholder = tf.placeholder(dtype=param.dtype.base_dtype, shape=param.get_shape())
                 assign_op = tf.assign(param, assign_placeholder)
                 self._cached_assign_ops[param] = assign_op
                 self._cached_assign_placeholders[param] = assign_placeholder
@@ -103,7 +93,7 @@ class Parameterized(object):
         Serializable.__setstate__(self, d)
         global load_params
         if load_params:
-            tf.get_default_session().run(tf.initialize_variables(self.get_params()))
+            tf.get_default_session().run(tf.variables_initializer(self.get_params()))
             self.set_param_values(d["params"])
 
 

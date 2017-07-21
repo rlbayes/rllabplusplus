@@ -8,6 +8,7 @@ from sandbox.rocky.tf.optimizers.first_order_optimizer import FirstOrderOptimize
 from sandbox.rocky.tf.misc import tensor_utils
 from rllab.core.serializable import Serializable
 import tensorflow as tf
+import gc
 
 
 class VPG(BatchPolopt, Serializable):
@@ -93,8 +94,6 @@ class VPG(BatchPolopt, Serializable):
         if is_recurrent:
             input_list.append(valid_var)
 
-        self.optimizer.update_opt(loss=surr_obj, target=self.policy, inputs=input_list)
-
         vars_info = {
             "mean_kl": mean_kl,
             "input_list": input_list,
@@ -112,18 +111,27 @@ class VPG(BatchPolopt, Serializable):
                 ndim=1 + is_recurrent,
                 dtype=tf.float32,
             )
-            qbaseline_info = self.qf_baseline.get_qbaseline_sim(
-                vars_info["obs_var"], scale_reward=self.scale_reward)
+            qvalue = self.qf.get_e_qval_sym(vars_info["obs_var"], self.policy, deterministic=True)
             qprop_surr_loss = - tf.reduce_mean(vars_info["lr"] *
                 vars_info["advantage_var"]) - tf.reduce_mean(
-                qbaseline_info["qvalue"] * eta_var)
+                qvalue * eta_var)
             input_list += [eta_var]
-            self.qprop_optimizer.update_opt(
+            self.optimizer.update_opt(
                 loss=qprop_surr_loss,
                 target=self.policy,
                 inputs=input_list,
             )
-            self.init_opt_critic(vars_info=vars_info, qbaseline_info=qbaseline_info)
+            control_variate = self.qf.get_cv_sym(obs_var,
+                    action_var, self.policy)
+            f_control_variate = tensor_utils.compile_function(
+                inputs=[obs_var, action_var],
+                outputs=control_variate,
+            )
+            self.opt_info_qprop = dict(
+                f_control_variate=f_control_variate,
+            )
+        else:
+            self.optimizer.update_opt(loss=surr_obj, target=self.policy, inputs=input_list)
 
         f_kl = tensor_utils.compile_function(
             inputs=input_list + old_dist_info_vars_list,
@@ -131,7 +139,9 @@ class VPG(BatchPolopt, Serializable):
         )
         self.opt_info = dict(
             f_kl=f_kl,
+            target_policy=self.policy,
         )
+        self.init_opt_critic()
 
     @overrides
     def optimize_policy(self, itr, samples_data):
@@ -145,15 +155,15 @@ class VPG(BatchPolopt, Serializable):
         inputs += tuple(state_info_list)
         if self.policy.recurrent:
             inputs += (samples_data["valids"],)
-        if self.qprop and self.qprop_enable:
-            optimizer = self.qprop_optimizer
+        if self.qprop:
             inputs += (samples_data["etas"], )
             logger.log("Using Qprop optimizer")
-        else:
-            optimizer = self.optimizer
+        optimizer = self.optimizer
         dist_info_list = [agent_infos[k] for k in self.policy.distribution.dist_info_keys]
         loss_before = optimizer.loss(inputs)
+        gc.collect()
         optimizer.optimize(inputs)
+        gc.collect()
         loss_after = optimizer.loss(inputs)
         logger.record_tabular("LossBefore", loss_before)
         logger.record_tabular("LossAfter", loss_after)

@@ -9,7 +9,7 @@ hash conda 2>/dev/null || {
 echo "Installing system dependencies"
 echo "You will probably be asked for your sudo password."
 sudo apt-get update
-sudo apt-get install -y python-pip python-dev swig cmake build-essential
+sudo apt-get install -y python-pip python-dev swig cmake build-essential zlib1g-dev
 sudo apt-get build-dep -y python-pygame
 sudo apt-get build-dep -y python-scipy
 
@@ -17,7 +17,7 @@ sudo apt-get build-dep -y python-scipy
 cd "$(dirname "$0")/.."
 
 echo "Creating conda environment..."
-conda env create -f environment.yml
+conda env create -f environment2.yml
 conda env update
 
 echo "Conda environment created! Make sure to run \`source activate rllab3\` whenever you open a new terminal and want to run programs under rllab."
